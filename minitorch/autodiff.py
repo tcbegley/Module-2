@@ -1,3 +1,6 @@
+import enum
+from collections import defaultdict, deque
+
 variable_count = 1
 
 
@@ -10,8 +13,9 @@ variable_count = 1
 class Variable:
     """
     Attributes:
-        history (:class:`History` or None) : the Function calls that created this variable or None if constant
-        derivative (variable type): the derivative with respect to this variable
+        history (:class:`History` or None) : the Function calls that created this
+            variable or None if constant derivative
+        (variable type): the derivative with respect to this variable
         grad (variable type) : alias for derivative, used for tensors
         name (string) : a globally unique name of the variable
     """
@@ -51,8 +55,8 @@ class Variable:
         Calls autodiff to fill in the derivatives for the history of this object.
 
         Args:
-            d_output (number, opt): starting derivative to backpropagate through the model
-                                   (typically left out, and assumed to be 1.0).
+            d_output (number, opt): starting derivative to backpropagate through the
+                model (typically left out, and assumed to be 1.0).
         """
         if d_output is None:
             d_output = 1.0
@@ -190,7 +194,7 @@ class History:
         Returns:
             list of numbers : a derivative with respect to `inputs`
         """
-        raise NotImplementedError('Need to include this file from past assignment.')
+        return self.last_fn.chain_rule(self.ctx, self.inputs, d_output)
 
 
 class FunctionBase:
@@ -262,17 +266,24 @@ class FunctionBase:
 
         Args:
             ctx (:class:`Context`) : The context from running forward
-            inputs (list of args) : The args that were passed to :func:`FunctionBase.apply` (e.g. :math:`x, y`)
+            inputs (list of args) : The args that were passed to
+                :func:`FunctionBase.apply` (e.g. :math:`x, y`)
             d_output (number) : The `d_output` value in the chain rule.
 
         Returns:
-            list of (`Variable`, number) : A list of non-constant variables with their derivatives
-            (see `is_constant` to remove unneeded variables)
+            list of (`Variable`, number) : A list of non-constant variables with their
+                derivatives (see `is_constant` to remove unneeded variables)
 
         """
-        # Tip: Note when implementing this function that
-        # cls.backward may return either a value or a tuple.
-        raise NotImplementedError('Need to include this file from past assignment.')
+        d_outputs = cls.backward(ctx, d_output)
+        if not isinstance(d_outputs, tuple):
+            d_outputs = (d_outputs,)
+
+        return [
+            (variable, derivative)
+            for variable, derivative in zip(inputs, d_outputs)
+            if not is_constant(variable)
+        ]
 
 
 # Algorithms for backpropagation
@@ -290,23 +301,62 @@ def topological_sort(variable):
         variable (:class:`Variable`): The right-most variable
 
     Returns:
-        list of Variables : Non-constant Variables in topological order
-                            starting from the right.
+        list of Variables : Non-constant Variables in topological order starting from
+            the right.
     """
-    raise NotImplementedError('Need to include this file from past assignment.')
+
+    class NodeState(enum.Enum):
+        UNVISITED = 0
+        VISITING = 1
+        VISITED = 2
+
+    order = deque()
+    state = defaultdict(lambda: NodeState.UNVISITED)
+
+    def helper(v):
+        if state[v.unique_id] == NodeState.VISITING:
+            # cycle detected
+            raise RuntimeError("Computation graph has a cycle")
+        elif state[v.unique_id] == NodeState.UNVISITED:
+            state[v.unique_id] = NodeState.VISITING
+            if not v.is_leaf():
+                for predecessor in v.history.inputs:
+                    if not is_constant(predecessor):
+                        helper(predecessor)
+            state[v.unique_id] = NodeState.VISITED
+            order.appendleft(v)
+
+    helper(variable)
+    return order
 
 
 def backpropagate(variable, deriv):
     """
-    Runs backpropagation on the computation graph in order to
-    compute derivatives for the leave nodes.
+    Runs backpropagation on the computation graph in order to compute derivatives for
+    the leaf nodes.
 
     See :doc:`backpropagate` for details on the algorithm.
 
     Args:
         variable (:class:`Variable`): The right-most variable
-        deriv (number) : Its derivative that we want to propagate backward to the leaves.
+        deriv (number) : Its derivative that we want to propagate backward to the
+            leaves.
 
-    No return. Should write to its results to the derivative values of each leaf through `accumulate_derivative`.
+    No return. Should write to its results to the derivative values of each leaf
+    through `accumulate_derivative`.
     """
-    raise NotImplementedError('Need to include this file from past assignment.')
+    queue = topological_sort(variable)
+
+    derivative_lookup = {v.unique_id: 0.0 for v in queue}
+    derivative_lookup[variable.unique_id] += deriv
+
+    while queue:
+        v = queue.popleft()
+        d = derivative_lookup[v.unique_id]
+
+        if v.is_leaf():
+            v.accumulate_derivative(d)
+        else:
+            derivatives = v.history.backprop_step(d)
+            for variable, derivative in derivatives:
+                derivative_lookup[variable.unique_id] += derivative
